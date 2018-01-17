@@ -106,47 +106,57 @@
 
 (defn make-failure-cb [ret-ch op-name]
   (fn [e]
-    (errorf "%s error: \n%s" op-name (lu/get-exception-msg-and-stacktrace e))
     (ca/put! ret-ch e)))
 
 (defn make-cbs [ret-ch op-name]
   [(make-success-cb ret-ch)
    (make-failure-cb ret-ch op-name)])
 
+(defn make-handler
+  ([success-cb failure-cb op-name]
+   (make-handler success-cb failure-cb op-name identity identity))
+  ([success-cb failure-cb op-name transform-result]
+   (make-handler success-cb failure-cb op-name transform-result identity))
+  ([success-cb failure-cb op-name transform-result transform-error]
+   (reify AsyncHandler
+     (onSuccess [this req result]
+       (try
+         (success-cb (transform-result result))
+         (catch Exception e
+           (try
+             (failure-cb e)
+             (catch Exception e
+               (errorf "Error calling failure-cb for %s: \n%s" op-name
+                       (lu/get-exception-msg-and-stacktrace e)))))))
+     (onError [this e]
+       (try
+         (failure-cb (transform-error e))
+         (catch Exception e
+           (errorf "Error calling failure-cb for %s: \n%s"
+                   op-name (lu/get-exception-msg-and-stacktrace e))))))))
+
 (defn make-boolean-handler [success-cb failure-cb op-name]
-  (reify AsyncHandler
-    (onError [this e]
-      (try
-        (failure-cb e)
-        (catch Exception e
-          (errorf "Error calling failure-cb for %s: \n%s"
-                  op-name (lu/get-exception-msg-and-stacktrace e)))))
-    (onSuccess [this req result]
-      (try
-        (success-cb true)
-        (catch Exception e
-          (try
-            (failure-cb e)
-            (errorf "Error calling failure-cb for %s: \n%s" op-name
-                    (lu/get-exception-msg-and-stacktrace e))))))))
+  (make-handler success-cb failure-cb op-name (constantly true) identity))
 
 (defn ddb-get
   ([client table-name key-map success-cb failure-cb]
    (ddb-get client table-name key-map success-cb failure-cb true))
   ([^AmazonDynamoDBAsyncClient client table-name key-map
     success-cb failure-cb consistent?]
-   (let [am (clj-map->attr-map key-map)
-         handler (reify AsyncHandler
-                   (onError [this e]
-                     (failure-cb e))
-                   (onSuccess [this req result]
-                     (try
-                       (-> (.getItem ^GetItemResult result)
-                           (attr-map->clj-map)
-                           (success-cb))
-                       (catch Exception e
-                         (failure-cb e)))))]
-     (.getItemAsync client table-name am consistent? handler))))
+   (try
+     (let [am (clj-map->attr-map key-map)
+           transform-result (fn [result]
+                              (-> (.getItem ^GetItemResult result)
+                                  (attr-map->clj-map)))
+           handler (make-handler success-cb failure-cb "ddb-get"
+                                 transform-result)]
+       (.getItemAsync client table-name am consistent? handler))
+     (catch Exception e
+       (try
+         (failure-cb e)
+         (catch Exception e
+          (errorf "Error calling failure-cb for ddb-get: %s"
+                  (lu/get-exception-msg-and-stacktrace e))))))))
 
 (defn <ddb-get
   ([client table-name key-map]
@@ -159,9 +169,16 @@
 
 (defn ddb-put
   [^AmazonDynamoDBAsyncClient client ^String table-name m success-cb failure-cb]
-  (let [^java.util.Map item (clj-map->attr-map m)
-        handler (make-boolean-handler success-cb failure-cb "ddb-put")]
-    (.putItemAsync client table-name item ^AsyncHandler handler)))
+  (try
+    (let [^java.util.Map item (clj-map->attr-map m)
+          handler (make-boolean-handler success-cb failure-cb "ddb-put")]
+      (.putItemAsync client table-name item ^AsyncHandler handler))
+    (catch Exception e
+      (try
+        (failure-cb e)
+        (catch Exception e
+          (errorf "Error calling failure-cb for ddb-put: %s"
+                  (lu/get-exception-msg-and-stacktrace e)))))))
 
 (defn <ddb-put [client table-name m]
   (let [ret-ch (ca/chan)
@@ -172,9 +189,16 @@
 (defn ddb-delete
   [^AmazonDynamoDBAsyncClient client ^String table-name key-map
    success-cb failure-cb]
-  (let [^java.util.Map am (clj-map->attr-map key-map)
-        handler (make-boolean-handler success-cb failure-cb "ddb-delete")]
-    (.deleteItemAsync client table-name am ^AsyncHandler handler)))
+  (try
+    (let [^java.util.Map am (clj-map->attr-map key-map)
+          handler (make-boolean-handler success-cb failure-cb "ddb-delete")]
+      (.deleteItemAsync client table-name am ^AsyncHandler handler))
+    (catch Exception e
+      (try
+        (failure-cb e)
+        (catch Exception e
+          (errorf "Error calling failure-cb for ddb-delete: %s"
+                  (lu/get-exception-msg-and-stacktrace e)))))))
 
 (defn <ddb-delete [^AmazonDynamoDBAsyncClient client ^String table-name key-map]
   (let [ret-ch (ca/chan)
@@ -182,50 +206,82 @@
     (ddb-delete client table-name key-map success-cb failure-cb)
     ret-ch))
 
-(defn ddb-update
-  [^AmazonDynamoDBAsyncClient client table-name key-map
-   update-map condition-exprs success-cb failure-cb]
-  (let [akm (clj-map->attr-map key-map)
-        handler (reify AsyncHandler
-                  (onError [this e]
-                    (try
-                      (if (instance? ConditionalCheckFailedException e)
-                        (failure-cb false)
-                        (failure-cb e))
-                      (catch Exception e
-                        (errorf "Error calling failure-cb for ddb-update: \n%s"
-                                (lu/get-exception-msg-and-stacktrace e)))))
-                  (onSuccess [this req result]
-                    (try
-                      (success-cb true)
-                      (catch Exception e
-                        (try
-                          (failure-cb e)
-                          (errorf
-                           "Error calling failure-cb for ddb-update: \n%s"
-                           (lu/get-exception-msg-and-stacktrace e)))))))
-        expr-vecs (map-indexed (fn [i [k v]]
-                                 (let [ean (str "#attr" i)
-                                       eav (str ":val" i)
-                                       eanv [ean (name k)]
-                                       eavm {eav v}
-                                       ue (str ean " = " eav)]
-                                   [eanv eavm ue]))
-                               update-map)
-        eanvs (map first expr-vecs)
-        eavms (map second expr-vecs)
-        uestr (->> (map #(nth % 2) expr-vecs)
+(defn make-condition-expr-string [condition-expr attr->alias value->alias]
+  (when condition-expr
+    (let [[op attr v] condition-expr
+          op (case op
+               := "="
+               :not= "<>"
+               :<> "<>"
+               :< "<"
+               :> ">"
+               :<= "<="
+               :>= ">=")]
+      (string/join " " [(attr->alias (name attr)) op (value->alias v)]))))
+
+(defn make-update-expression-data [update-map condition-expr]
+  (let [update-avps (into [] update-map)
+        avps (if condition-expr
+               (conj update-map (subvec condition-expr 1))
+               update-map)
+        alias-info (reduce (fn [acc [i [attr value]]]
+                             (let [a-alias (str "#attr" i)
+                                   v-alias (str ":val" i)
+                                   attr (name attr)]
+                               (-> acc
+                                   (update :attr->alias assoc attr a-alias)
+                                   (update :alias->attr assoc a-alias attr)
+                                   (update :value->alias assoc value v-alias)
+                                   (update :alias->value assoc v-alias value))))
+                           {:attr->alias {}
+                            :alias->attr {}
+                            :value->alias {}
+                            :alias->value {}}
+                           (map-indexed vector avps))
+        {:keys [attr->alias alias->attr value->alias alias->value]} alias-info
+        make-update-pair (fn [[attr value]]
+                           (let [a-alias (attr->alias (name attr))
+                                 v-alias (value->alias value)]
+                             (str a-alias " = " v-alias)))
+        uestr (->> update-map
+                   (map make-update-pair)
                    (string/join ",")
                    (str "SET "))
-        uir (doto (UpdateItemRequest.)
-              (.setTableName table-name)
-              (.setKey akm)
-              (.setExpressionAttributeValues (clj-map->attr-map
-                                              (apply merge eavms)))
-              (.setUpdateExpression uestr))]
-    (doseq [[alias attr-name] eanvs]
-      (.addExpressionAttributeNamesEntry uir alias attr-name))
-    (.updateItemAsync client uir handler)))
+        cestr (make-condition-expr-string condition-expr attr->alias
+                                          value->alias)]
+    (sym-map alias->attr alias->value uestr cestr)))
+
+(defn ddb-update
+  [^AmazonDynamoDBAsyncClient client table-name key-map
+   update-map condition-expr success-cb failure-cb]
+  (try
+    (let [akm (clj-map->attr-map key-map)
+          transform-result (constantly true)
+          transform-error (fn [e]
+                            (if (instance? ConditionalCheckFailedException e)
+                              false
+                              e))
+          handler (make-handler success-cb failure-cb "ddb-update"
+                                transform-result transform-error)
+          data (make-update-expression-data update-map condition-expr)
+          {:keys [alias->attr alias->value uestr cestr]} data
+          uir (doto (UpdateItemRequest.)
+                (.setTableName table-name)
+                (.setKey akm)
+                (.setExpressionAttributeValues (clj-map->attr-map
+                                                alias->value))
+                (.setUpdateExpression uestr))]
+      (doseq [[alias attr-name] alias->attr]
+        (.addExpressionAttributeNamesEntry uir alias attr-name))
+      (when cestr
+        (.setConditionExpression uir cestr))
+      (.updateItemAsync client uir handler))
+    (catch Exception e
+      (try
+        (failure-cb e)
+        (catch Exception e
+          (errorf "Error calling failure-cb for ddb-update: %s"
+                  (lu/get-exception-msg-and-stacktrace e)))))))
 
 (defn <ddb-update
   ([client table-name key-map update-map]

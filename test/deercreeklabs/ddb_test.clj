@@ -44,7 +44,7 @@
          (finally
            (ddb/stop c1)
            (ddb/stop c2)))))))
-#_
+
 (deftest test-get-put-delete
   (au/test-async
    5000
@@ -77,40 +77,46 @@
      (let [client (du/make-ddb-client)
            table-name "ddb-test"
            m {:part "b" :sort 789 :value "Foo"}
+
            ret-ch (du/<ddb-put client table-name m)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
            _ (is (true? ret))
+
            k (select-keys m [:part :sort])
            new-value "Bar"
-           ret-ch (du/<ddb-update client table-name k {:value new-value})
+           new-fruit "Apple"
+           ret-ch (du/<ddb-update client table-name k
+                                  {:value new-value
+                                   :fruit new-fruit})
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
            _ (is (true? ret))
+
            ret-ch (du/<ddb-get client table-name k)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
            _ (is (= new-value (:value ret)))
+           _ (is (= new-fruit (:fruit ret)))
+
+           newer-fruit "Pear"
+           ret-ch (du/<ddb-update client table-name k
+                                  {:fruit newer-fruit}
+                                  [:= :value "Foo"])
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (false? ret))
+
+           newer-fruit "Pear"
+           ret-ch (du/<ddb-update client table-name k
+                                  {:fruit newer-fruit}
+                                  [:= :value "Bar"])
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (true? ret))
+
            ret-ch (du/<ddb-delete client table-name k)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
            _ (is (true?  ret))
            ]))))
-
-
-;; (deftest test-update
-;;   (au/test-async
-;;    5000
-;;    (ca/go
-;;      (let [client (du/make-ddb-client)
-;;            table-name "ddb-test"
-;;            m {:part "a" :sort 123 :val1 :val2 "Foo"}
-;;            ret-ch (du/<ddb-put client table-name m)
-;;            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
-;;            _ (is (= ret-ch ch))
-;;            _ (is (true? ret))
-;;            k (select-keys m [:part :sort])
-;;            ret-ch (du/<ddb-get client table-name k)
-;;            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
-;;            _ (is (= ret-ch ch))
-;;            _ (is (= m ret))]))))
