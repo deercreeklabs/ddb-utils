@@ -1,6 +1,7 @@
 (ns deercreeklabs.ddb-utils
   (:require
    [clojure.core.async :as ca]
+   [clojure.string :as string]
    [deercreeklabs.async-utils :as au]
    [deercreeklabs.baracus :as ba]
    [deercreeklabs.log-utils :as lu :refer [debugs]]
@@ -12,6 +13,7 @@
                                       AmazonDynamoDBAsyncClientBuilder)
    (com.amazonaws.services.dynamodbv2.model AttributeValue
                                             AttributeValueUpdate
+                                            ConditionalCheckFailedException
                                             GetItemRequest
                                             GetItemResult
                                             PutItemResult
@@ -63,10 +65,11 @@
       :NULL nil)))
 
 (defn attr-map->clj-map [am]
-  (reduce-kv (fn [acc k av]
-               (assoc acc (keyword k)
-                      (get-value av)))
-             {} (into {} am)))
+  (when am
+    (reduce-kv (fn [acc k av]
+                 (assoc acc (keyword k)
+                        (get-value av)))
+               {} (into {} am))))
 
 (defn clj-key->str-key [k]
   (name k))
@@ -95,12 +98,44 @@
                       (clj-value->attr-value v)))
              {} m))
 
+(defn make-success-cb [ret-ch]
+  (fn [result]
+    (if (nil? result)
+      (ca/close! ret-ch)
+      (ca/put! ret-ch result))))
+
+(defn make-failure-cb [ret-ch op-name]
+  (fn [e]
+    (errorf "%s error: \n%s" op-name (lu/get-exception-msg-and-stacktrace e))
+    (ca/put! ret-ch e)))
+
+(defn make-cbs [ret-ch op-name]
+  [(make-success-cb ret-ch)
+   (make-failure-cb ret-ch op-name)])
+
+(defn make-boolean-handler [success-cb failure-cb op-name]
+  (reify AsyncHandler
+    (onError [this e]
+      (try
+        (failure-cb e)
+        (catch Exception e
+          (errorf "Error calling failure-cb for %s: \n%s"
+                  op-name (lu/get-exception-msg-and-stacktrace e)))))
+    (onSuccess [this req result]
+      (try
+        (success-cb true)
+        (catch Exception e
+          (try
+            (failure-cb e)
+            (errorf "Error calling failure-cb for %s: \n%s" op-name
+                    (lu/get-exception-msg-and-stacktrace e))))))))
+
 (defn ddb-get
-  ([client table-name clj-key-map success-cb failure-cb]
-   (ddb-get client table-name clj-key-map success-cb failure-cb true))
-  ([^AmazonDynamoDBAsyncClient client table-name clj-key-map
+  ([client table-name key-map success-cb failure-cb]
+   (ddb-get client table-name key-map success-cb failure-cb true))
+  ([^AmazonDynamoDBAsyncClient client table-name key-map
     success-cb failure-cb consistent?]
-   (let [am (clj-map->attr-map clj-key-map)
+   (let [am (clj-map->attr-map key-map)
          handler (reify AsyncHandler
                    (onError [this e]
                      (failure-cb e))
@@ -114,90 +149,158 @@
      (.getItemAsync client table-name am consistent? handler))))
 
 (defn <ddb-get
-  ([client table-name clj-key-map]
-   (<ddb-get client table-name clj-key-map true))
-  ([client table-name clj-key-map consistent?]
+  ([client table-name key-map]
+   (<ddb-get client table-name key-map true))
+  ([client table-name key-map consistent?]
    (let [ret-ch (ca/chan)
-         success-cb (fn [result]
-                      (ca/put! ret-ch result))
-         failure-cb (fn [e]
-                      (errorf "<ddb-get error: \n%s"
-                              (lu/get-exception-msg-and-stacktrace e))
-                      (ca/put! ret-ch e))]
-     (ddb-get client table-name clj-key-map success-cb failure-cb consistent?)
+         [success-cb failure-cb] (make-cbs ret-ch "<ddb-get")]
+     (ddb-get client table-name key-map success-cb failure-cb consistent?)
      ret-ch)))
 
-(defn ddb-set
+(defn ddb-put
   [^AmazonDynamoDBAsyncClient client ^String table-name m success-cb failure-cb]
   (let [^java.util.Map item (clj-map->attr-map m)
+        handler (make-boolean-handler success-cb failure-cb "ddb-put")]
+    (.putItemAsync client table-name item ^AsyncHandler handler)))
+
+(defn <ddb-put [client table-name m]
+  (let [ret-ch (ca/chan)
+        [success-cb failure-cb] (make-cbs ret-ch "<ddb-put")]
+    (ddb-put client table-name m success-cb failure-cb)
+    ret-ch))
+
+(defn ddb-delete
+  [^AmazonDynamoDBAsyncClient client ^String table-name key-map
+   success-cb failure-cb]
+  (let [^java.util.Map am (clj-map->attr-map key-map)
+        handler (make-boolean-handler success-cb failure-cb "ddb-delete")]
+    (.deleteItemAsync client table-name am ^AsyncHandler handler)))
+
+(defn <ddb-delete [^AmazonDynamoDBAsyncClient client ^String table-name key-map]
+  (let [ret-ch (ca/chan)
+        [success-cb failure-cb] (make-cbs ret-ch "<ddb-delete")]
+    (ddb-delete client table-name key-map success-cb failure-cb)
+    ret-ch))
+
+(defn ddb-update
+  [^AmazonDynamoDBAsyncClient client table-name key-map
+   update-map condition-exprs success-cb failure-cb]
+  (let [akm (clj-map->attr-map key-map)
         handler (reify AsyncHandler
                   (onError [this e]
-                    (failure-cb e))
+                    (try
+                      (if (instance? ConditionalCheckFailedException e)
+                        (failure-cb false)
+                        (failure-cb e))
+                      (catch Exception e
+                        (errorf "Error calling failure-cb for ddb-update: \n%s"
+                                (lu/get-exception-msg-and-stacktrace e)))))
                   (onSuccess [this req result]
                     (try
                       (success-cb true)
                       (catch Exception e
-                        (failure-cb e)))))]
-    (.putItemAsync client table-name item ^AsyncHandler handler)))
+                        (try
+                          (failure-cb e)
+                          (errorf
+                           "Error calling failure-cb for ddb-update: \n%s"
+                           (lu/get-exception-msg-and-stacktrace e)))))))
+        expr-vecs (map-indexed (fn [i [k v]]
+                                 (let [ean (str "#attr" i)
+                                       eav (str ":val" i)
+                                       eanv [ean (name k)]
+                                       eavm {eav v}
+                                       ue (str ean " = " eav)]
+                                   [eanv eavm ue]))
+                               update-map)
+        eanvs (map first expr-vecs)
+        eavms (map second expr-vecs)
+        uestr (->> (map #(nth % 2) expr-vecs)
+                   (string/join ",")
+                   (str "SET "))
+        uir (doto (UpdateItemRequest.)
+              (.setTableName table-name)
+              (.setKey akm)
+              (.setExpressionAttributeValues (clj-map->attr-map
+                                              (apply merge eavms)))
+              (.setUpdateExpression uestr))]
+    (doseq [[alias attr-name] eanvs]
+      (.addExpressionAttributeNamesEntry uir alias attr-name))
+    (.updateItemAsync client uir handler)))
 
-(defn <ddb-set [client table-name m]
-  (let [ret-ch (ca/chan)
-        success-cb (fn [result]
-                     (ca/put! ret-ch result))
-        failure-cb (fn [e]
-                     (errorf "<ddb-set error: \n%s"
-                             (lu/get-exception-msg-and-stacktrace e))
-                     (ca/put! ret-ch e))]
-    (ddb-set client table-name m success-cb failure-cb)
-    ret-ch))
+(defn <ddb-update
+  ([client table-name key-map update-map]
+   (<ddb-update client table-name key-map update-map nil))
+  ([client table-name key-map update-map condition-exprs]
+   (let [ret-ch (ca/chan)
+         [success-cb failure-cb] (make-cbs ret-ch "<ddb-update")]
+     (ddb-update client table-name key-map update-map condition-exprs
+                 success-cb failure-cb)
+     ret-ch)))
 
 (defn ^AmazonDynamoDBAsyncClient make-ddb-client []
   (AmazonDynamoDBAsyncClientBuilder/defaultClient))
 
-;; (defprotocol IDistributedLock
+;; (defprotocol IDistributedLockClient
 ;;   (acquired? [this])
-;;   (release [this])
 ;;   (stop [this])
 ;;   (start-aquire-loop* [this]))
 
-;; (defrecord DistributedLock
-;;     [lock-name actor-name timeout-ms on-acquire on-release
-;;      refresh-to-check-ratio client *acquired? *shutdown?]
-;;   IDistributedLock
+;; (defrecord DistributedLockClient
+;;     [lock-name actor-name lease-length-ms on-acquire on-release
+;;      refresh-ratio client *acquired? *shutdown?]
+;;   IDistributedLockClient
 ;;   (acquired? [this]
 ;;     @*acquired?)
-;;   (release [this]
-;;     ...)
+
 ;;   (stop [this]
 ;;     (when (acquired? this)
-;;       (release this))
+;;       (on-release this))
 ;;     (reset! *shutdown? true))
+
+;;   (<attempt-acquisition* [this lease-id lease-length-ms]
+;;     (debugf "%s: Entering <attempt-acquisition*" actor-name)
+;;     (au/go
+;;       (ca/<! (ca/timeout lease-length-ms))
+;;       ))
+
+;;   (<create-lock* [this]
+;;     (au/go
+;;       ))
+
+;;   (<refresh-lock* [this]
+;;     (debugf "%s: Entering <refresh-lock*" actor-name)
+;;     (au/go
+;;       (ca/<! (ca/timeout (/ lease-length-ms refresh-ratio)))
+;;       (au/<? ())))
+
 ;;   (start-aquire-loop* [this]
 ;;     (ca/go
 ;;       (try
-;;         (while-not (@*shutdown?)
+;;         (while-not @*shutdown
 ;;           (let [k (u/sym-map lock-name)
-;;                 ret (au/<? (<ddb-get client locks-table-name k))
-;;                 {:keys [owner last-refresh-time-ms]} ret
-;;                 now (u/get-current-time-ms)]
-;;             (if (and (= actor-name owner)))))
+;;                 info (or (au/<? (<ddb-get client locks-table-name k))
+;;                          (au/<? (<create-lock* this)))
+;;                 {:keys [owner lease-length-ms lease-id]} info]
+;;             (if (= actor-name owner)
+;;               (au/<? (<refresh-lock* this))
+;;               (au/<? (attempt-acquisition* this lease-id lease-length-ms)))))
 ;;         (catch Exception e
 ;;           (errorf "Error in start-aquire-loop*: %s"
 ;;                   (lu/get-exception-msg-and-stacktrace e)))))))
 
-;; (defn make-distributed-lock
-;;   ([lock-name actor-name timeout-ms on-acquire on-release]
+;; (defn make-distributed-lock-client
+;;   ([lock-name actor-name lease-length-ms on-acquire on-release]
 ;;    (make-distributed-lock
-;;     lock-name actor-name timeout-ms on-acquire on-release
-;;     default-refresh-to-check-ratio))
-;;   ([lock-name actor-name timeout-ms on-acquire on-release
-;;     refresh-to-check-ratio])
-;;   (let [^AmazonDynamoDBAsyncClient ddb-client
-;;         (AmazonDynamoDBAsyncClientBuilder/defaultClient)
-;;         *acquired? (atom false)
-;;         *shutdown? (atom false)
-;;         lock (->DistributedLock
-;;               lock-name actor-name timeout-ms on-acquire on-release
-;;               refresh-to-check-ratio client *acquired? *shutdown?)]
-;;     (start-aquire-loop* lock)
-;;     lock))
+;;     lock-name actor-name lease-length-ms on-acquire on-release
+;;     default-refresh-ratio))
+;;   ([lock-name actor-name lease-length-ms on-acquire on-release
+;;     refresh-ratio]
+;;    (let [^AmazonDynamoDBAsyncClient ddb-client
+;;          (AmazonDynamoDBAsyncClientBuilder/defaultClient)
+;;          *acquired? (atom false)
+;;          *shutdown? (atom false)
+;;          lock (->DistributedLock
+;;                lock-name actor-name lease-length-ms on-acquire on-release
+;;                refresh-ratio client *acquired? *shutdown?)]
+;;      (start-aquire-loop* lock)
+;;      lock)))
