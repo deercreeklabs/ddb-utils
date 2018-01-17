@@ -44,15 +44,11 @@
      :appenders
      {:println {:ns-blacklist []}}})))
 
-(defn get-current-time-ms
-  []
-  (System/currentTimeMillis))
-
 (defn- parse-number
-  [^String ns]
-  (if (.contains ns ".")
-    (Double/parseDouble ns)
-    (Long/parseLong ns)))
+  [^String num-str]
+  (if (.contains num-str ".")
+    (Double/parseDouble num-str)
+    (Long/parseLong num-str)))
 
 (defn get-value [av]
   (let [[type val] (some #(when-not (nil? (val %)) %)

@@ -27,7 +27,7 @@
    :uberjar {:aot :all}}
 
   :dependencies
-  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.263"
+  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.266"
     :exclusions [commons-logging joda-time]]
    [com.taoensso/timbre "4.10.0" :exclusions [org.clojure/tools.reader]]
    [commons-logging/commons-logging "1.2"]
