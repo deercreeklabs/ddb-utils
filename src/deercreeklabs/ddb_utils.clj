@@ -19,9 +19,11 @@
                                             PutItemResult
                                             UpdateItemRequest
                                             UpdateItemResult)
-   (java.nio ByteBuffer)))
+   (java.nio ByteBuffer)
+   (java.security SecureRandom)))
 
 (def default-refresh-to-check-ratio 5)
+(def lock-table-name "locks")
 
 (defmacro sym-map
   "Builds a map from symbols.
@@ -206,39 +208,82 @@
     (ddb-delete client table-name key-map success-cb failure-cb)
     ret-ch))
 
-(defn make-condition-expr-string [condition-expr attr->alias value->alias]
-  (when condition-expr
-    (let [[op attr v] condition-expr
-          op (case op
-               := "="
-               :not= "<>"
-               :<> "<>"
-               :< "<"
-               :> ">"
-               :<= "<="
-               :>= ">=")]
-      (string/join " " [(attr->alias (name attr)) op (value->alias v)]))))
+(defn op-type-dispatch [cond-expr & args]
+  (when cond-expr
+    (let [op (first cond-expr)]
+      (cond
+        (#{:= :not= :<> :< :> :<= :>=} op) :comparison
+        (#{:exists :not-exists} op) :existential
+        :else (throw (ex-info (str "Unknown operator: " op)
+                              (sym-map op cond-expr)))))))
 
-(defn make-update-expression-data [update-map condition-expr]
-  (let [update-avps (into [] update-map)
-        avps (if condition-expr
-               (conj update-map (subvec condition-expr 1))
-               update-map)
-        alias-info (reduce (fn [acc [i [attr value]]]
-                             (let [a-alias (str "#attr" i)
-                                   v-alias (str ":val" i)
-                                   attr (name attr)]
+(defmulti cond-expr->string op-type-dispatch)
+(defmulti cond-expr->attrs-and-values op-type-dispatch)
+
+(defmethod cond-expr->string :comparison
+  [cond-expr attr->alias value->alias]
+  (let [[op attr v] cond-expr
+        op->str {:= "="
+                 :not= "<>"
+                 :<> "<>"
+                 :< "<"
+                 :> ">"
+                 :<= "<="
+                 :>= ">="}]
+    (string/join " " [(attr->alias (name attr))
+                      (op->str op)
+                      (value->alias v)])))
+
+(defmethod cond-expr->string :existential
+  [cond-expr attr->alias value->alias]
+  (let [[op attr] cond-expr
+        op->str {:exists "attribute_exists"
+                 :not-exists "attribute_not_exists"}]
+    (str (op->str op) "(" (attr->alias (name attr)) ")")))
+
+(defmethod cond-expr->string nil
+  [cond-expr attr->alias value->alias]
+  nil)
+
+(defmethod cond-expr->attrs-and-values :comparison
+  [cond-expr]
+  (let [[op attr v] cond-expr]
+    [[attr] [v]]))
+
+(defmethod cond-expr->attrs-and-values :existential
+  [cond-expr]
+  (let [[op attr] cond-expr]
+    [[attr] []]))
+
+(defmethod cond-expr->attrs-and-values nil
+  [cond-expr]
+  [[] []])
+
+(defn make-update-expression-data [update-map cond-expr]
+  (let [[ce-attrs ce-vals] (cond-expr->attrs-and-values cond-expr)
+        um-attrs (keys update-map)
+        um-vals (vals update-map)
+        attrs (set (concat ce-attrs um-attrs))
+        vals (set (concat ce-vals um-vals))
+        attr-info (reduce (fn [acc [i attr]]
+                            (let [a-alias (str "#attr" i)
+                                  attr (name attr)]
+                              (-> acc
+                                  (update :attr->alias assoc attr a-alias)
+                                  (update :alias->attr assoc a-alias attr))))
+                          {:attr->alias {}
+                           :alias->attr {}}
+                          (map-indexed vector attrs))
+        val-info (reduce (fn [acc [i value]]
+                             (let [v-alias (str ":val" i)]
                                (-> acc
-                                   (update :attr->alias assoc attr a-alias)
-                                   (update :alias->attr assoc a-alias attr)
                                    (update :value->alias assoc value v-alias)
                                    (update :alias->value assoc v-alias value))))
-                           {:attr->alias {}
-                            :alias->attr {}
-                            :value->alias {}
+                           {:value->alias {}
                             :alias->value {}}
-                           (map-indexed vector avps))
-        {:keys [attr->alias alias->attr value->alias alias->value]} alias-info
+                           (map-indexed vector vals))
+        {:keys [attr->alias alias->attr]} attr-info
+        {:keys [value->alias alias->value]} val-info
         make-update-pair (fn [[attr value]]
                            (let [a-alias (attr->alias (name attr))
                                  v-alias (value->alias value)]
@@ -247,13 +292,12 @@
                    (map make-update-pair)
                    (string/join ",")
                    (str "SET "))
-        cestr (make-condition-expr-string condition-expr attr->alias
-                                          value->alias)]
+        cestr (cond-expr->string cond-expr attr->alias value->alias)]
     (sym-map alias->attr alias->value uestr cestr)))
 
 (defn ddb-update
   [^AmazonDynamoDBAsyncClient client table-name key-map
-   update-map condition-expr success-cb failure-cb]
+   update-map cond-expr success-cb failure-cb]
   (try
     (let [akm (clj-map->attr-map key-map)
           transform-result (constantly true)
@@ -263,7 +307,7 @@
                               e))
           handler (make-handler success-cb failure-cb "ddb-update"
                                 transform-result transform-error)
-          data (make-update-expression-data update-map condition-expr)
+          data (make-update-expression-data update-map cond-expr)
           {:keys [alias->attr alias->value uestr cestr]} data
           uir (doto (UpdateItemRequest.)
                 (.setTableName table-name)
@@ -286,15 +330,21 @@
 (defn <ddb-update
   ([client table-name key-map update-map]
    (<ddb-update client table-name key-map update-map nil))
-  ([client table-name key-map update-map condition-exprs]
+  ([client table-name key-map update-map cond-expr]
    (let [ret-ch (ca/chan)
          [success-cb failure-cb] (make-cbs ret-ch "<ddb-update")]
-     (ddb-update client table-name key-map update-map condition-exprs
+     (ddb-update client table-name key-map update-map cond-expr
                  success-cb failure-cb)
      ret-ch)))
 
 (defn ^AmazonDynamoDBAsyncClient make-ddb-client []
   (AmazonDynamoDBAsyncClientBuilder/defaultClient))
+
+;; (defn make-lease-id []
+;;   (let [rng (SecureRandom.)
+;;         bytes (byte-array 8)]
+;;     (.nextBytes rng bytes)
+;;     (ba/byte-array->b64 bytes)))
 
 ;; (defprotocol IDistributedLockClient
 ;;   (acquired? [this])
@@ -302,7 +352,7 @@
 ;;   (start-aquire-loop* [this]))
 
 ;; (defrecord DistributedLockClient
-;;     [lock-name actor-name lease-length-ms on-acquire on-release
+;;     [ddb-client lock-name actor-name lease-length-ms on-acquire on-release
 ;;      refresh-ratio client *acquired? *shutdown?]
 ;;   IDistributedLockClient
 ;;   (acquired? [this]
@@ -320,14 +370,21 @@
 ;;       ))
 
 ;;   (<create-lock* [this]
-;;     (au/go
-;;       ))
+;;     (let [owner actor-name
+;;           lease-id (make-lease-id)
+;;           k (sym-map lock-name)
+;;           update-map (sym-map owner lease-id lease-length-ms)
+;;           cond-expr [:not-exists :lock-name]]
+;;       (<ddb-update ddb-client lock-table-name k update-map cond-expr)))
 
 ;;   (<refresh-lock* [this]
 ;;     (debugf "%s: Entering <refresh-lock*" actor-name)
 ;;     (au/go
 ;;       (ca/<! (ca/timeout (/ lease-length-ms refresh-ratio)))
-;;       (au/<? ())))
+;;       (let [update-map {:}
+;;             cond-expr]
+;;         (au/<? (<ddb-update ddb-client lock-table-name k
+;;                             update-map cond-expr)))))
 
 ;;   (start-aquire-loop* [this]
 ;;     (ca/go
@@ -356,7 +413,7 @@
 ;;          *acquired? (atom false)
 ;;          *shutdown? (atom false)
 ;;          lock (->DistributedLock
-;;                lock-name actor-name lease-length-ms on-acquire on-release
+;;                ddb-client lock-name actor-name lease-length-ms on-acquire on-release
 ;;                refresh-ratio client *acquired? *shutdown?)]
 ;;      (start-aquire-loop* lock)
 ;;      lock)))

@@ -115,6 +115,18 @@
            _ (is (= ret-ch ch))
            _ (is (true? ret))
 
+           ret-ch (du/<ddb-update client table-name k
+                                  {:yo "dawg"}
+                                  [:not-exists :part])
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (false? ret))
+
+           ret-ch (du/<ddb-get client table-name k)
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (nil? (:yo ret)))
+
            ret-ch (du/<ddb-delete client table-name k)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
