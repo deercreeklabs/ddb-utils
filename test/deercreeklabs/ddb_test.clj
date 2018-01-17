@@ -107,7 +107,6 @@
            _ (is (= ret-ch ch))
            _ (is (false? ret))
 
-           newer-fruit "Pear"
            ret-ch (du/<ddb-update client table-name k
                                   {:fruit newer-fruit}
                                   [:= :value "Bar"])
@@ -116,7 +115,7 @@
            _ (is (true? ret))
 
            ret-ch (du/<ddb-update client table-name k
-                                  {:yo "dawg"}
+                                  {:fruit "Tomato"}
                                   [:not-exists :part])
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
@@ -125,7 +124,20 @@
            ret-ch (du/<ddb-get client table-name k)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
-           _ (is (nil? (:yo ret)))
+           _ (is (= {:fruit "Pear", :part "b", :sort 789, :value "Bar"} ret))
+
+           k2 {:part "a" :sort 123}
+           v2 {:yo "dawg"}
+           ret-ch (du/<ddb-update client table-name k2 v2
+                                  [:not-exists :part])
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (true? ret))
+
+           ret-ch (du/<ddb-get client table-name k2)
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (= (merge k2 v2) ret))
 
            ret-ch (du/<ddb-delete client table-name k)
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
