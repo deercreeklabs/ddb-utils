@@ -13,37 +13,38 @@
 ;; Use this instead of fixtures, which are hard to make work w/ async testing.
 (s/set-fn-validation! true)
 
-#_
+
 (deftest ^:the-one test-distributed-locks
   (au/test-async
    60000
    (ca/go
      (let [lock-name "test-app-primary"
+           lease-length-ms 3000
            lch (ca/chan)
            on-acq1 #(ca/put! lch :c1-got-lock)
            on-rel1 #(ca/put! lch :c1-released-lock)
            on-acq2 #(ca/put! lch :c2-got-lock)
            on-rel2 #(ca/put! lch :c2-released-lock)
-           c1 (ddb/make-distributed-lock-client
-               lock-name "c1" 5000 on-acq1 on-rel1)
-           _ (ca/<! (ca/timeout 100))
-           c2 (ddb/make-distributed-lock-client
-               lock-name "c2" 5000 on-acq2 on-rel2)]
+           c1 (du/make-distributed-lock-client
+               lock-name "c1" lease-length-ms on-acq1 on-rel1)
+           _ (ca/<! (ca/timeout (* 1.5 lease-length-ms)))
+           c2 (du/make-distributed-lock-client
+               lock-name "c2" lease-length-ms on-acq2 on-rel2)]
        (try
          (let [[v ch] (au/alts? [lch (ca/timeout 1000)])
                _ (is (= lch ch))
                _ (is (= :c1-got-lock v))
-               _ (ca/<! (ca/timeout 12000))
-               _ (ddb/stop c1)
+               _ (du/stop c1)
                [v ch] (au/alts? [lch (ca/timeout 1000)])
                _ (is (= lch ch))
                _ (is (= :c1-released-lock v))
+               _ (ca/<! (ca/timeout (* 1.5 lease-length-ms)))
                [v ch] (au/alts? [lch (ca/timeout 1000)])
                _ (is (= lch ch))
                _ (is (= :c2-got-lock v))])
          (finally
-           (ddb/stop c1)
-           (ddb/stop c2)))))))
+           (du/stop c1)
+           (du/stop c2)))))))
 
 (deftest test-get-put-delete
   (au/test-async

@@ -22,7 +22,7 @@
    (java.nio ByteBuffer)
    (java.security SecureRandom)))
 
-(def default-refresh-to-check-ratio 5)
+(def default-lock-refresh-ratio 4)
 (def lock-table-name "locks")
 
 (defmacro sym-map
@@ -157,8 +157,8 @@
        (try
          (failure-cb e)
          (catch Exception e
-          (errorf "Error calling failure-cb for ddb-get: %s"
-                  (lu/get-exception-msg-and-stacktrace e))))))))
+           (errorf "Error calling failure-cb for ddb-get: %s"
+                   (lu/get-exception-msg-and-stacktrace e))))))))
 
 (defn <ddb-get
   ([client table-name key-map]
@@ -275,23 +275,24 @@
                            :alias->attr {}}
                           (map-indexed vector attrs))
         val-info (reduce (fn [acc [i value]]
-                             (let [v-alias (str ":val" i)]
-                               (-> acc
-                                   (update :value->alias assoc value v-alias)
-                                   (update :alias->value assoc v-alias value))))
-                           {:value->alias {}
-                            :alias->value {}}
-                           (map-indexed vector vals))
+                           (let [v-alias (str ":val" i)]
+                             (-> acc
+                                 (update :value->alias assoc value v-alias)
+                                 (update :alias->value assoc v-alias value))))
+                         {:value->alias {}
+                          :alias->value {}}
+                         (map-indexed vector vals))
         {:keys [attr->alias alias->attr]} attr-info
         {:keys [value->alias alias->value]} val-info
         make-update-pair (fn [[attr value]]
                            (let [a-alias (attr->alias (name attr))
                                  v-alias (value->alias value)]
                              (str a-alias " = " v-alias)))
-        uestr (->> update-map
-                   (map make-update-pair)
-                   (string/join ",")
-                   (str "SET "))
+        uestr (when update-map
+                (->> update-map
+                     (map make-update-pair)
+                     (string/join ",")
+                     (str "SET ")))
         cestr (cond-expr->string cond-expr attr->alias value->alias)]
     (sym-map alias->attr alias->value uestr cestr)))
 
@@ -313,8 +314,9 @@
                 (.setTableName table-name)
                 (.setKey akm)
                 (.setExpressionAttributeValues (clj-map->attr-map
-                                                alias->value))
-                (.setUpdateExpression uestr))]
+                                                alias->value)))]
+      (when uestr
+        (.setUpdateExpression uir uestr))
       (doseq [[alias attr-name] alias->attr]
         (.addExpressionAttributeNamesEntry uir alias attr-name))
       (when cestr
@@ -340,80 +342,128 @@
 (defn ^AmazonDynamoDBAsyncClient make-ddb-client []
   (AmazonDynamoDBAsyncClientBuilder/defaultClient))
 
-;; (defn make-lease-id []
-;;   (let [rng (SecureRandom.)
-;;         bytes (byte-array 8)]
-;;     (.nextBytes rng bytes)
-;;     (ba/byte-array->b64 bytes)))
+(defn make-lease-id []
+  (let [rng (SecureRandom.)
+        bytes (byte-array 8)]
+    (.nextBytes rng bytes)
+    (ba/byte-array->b64 bytes)))
 
-;; (defprotocol IDistributedLockClient
-;;   (acquired? [this])
-;;   (stop [this])
-;;   (start-aquire-loop* [this]))
+(defprotocol IDistributedLockClient
+  (acquired? [this])
+  (stop [this])
+  (release* [this])
+  (acquire* [this])
+  (<attempt-acquisition* [this prior-lease-id prior-lease-length-ms])
+  (<create-lock* [this])
+  (<refresh-lock* [this])
+  (start-aquire-loop* [this]))
 
-;; (defrecord DistributedLockClient
-;;     [ddb-client lock-name actor-name lease-length-ms on-acquire on-release
-;;      refresh-ratio client *acquired? *shutdown?]
-;;   IDistributedLockClient
-;;   (acquired? [this]
-;;     @*acquired?)
+(defrecord DistributedLockClient
+    [ddb-client lock-name actor-name lease-length-ms on-acquire on-release
+     refresh-ratio *acquired? *shutdown?]
+  IDistributedLockClient
+  (acquired? [this]
+    @*acquired?)
 
-;;   (stop [this]
-;;     (when (acquired? this)
-;;       (on-release this))
-;;     (reset! *shutdown? true))
+  (stop [this]
+    (reset! *shutdown? true)
+    (release* this))
 
-;;   (<attempt-acquisition* [this lease-id lease-length-ms]
-;;     (debugf "%s: Entering <attempt-acquisition*" actor-name)
-;;     (au/go
-;;       (ca/<! (ca/timeout lease-length-ms))
-;;       ))
+  (release* [this]
+    (when (acquired? this)
+      (reset! *acquired? false)
+      (on-release)))
 
-;;   (<create-lock* [this]
-;;     (let [owner actor-name
-;;           lease-id (make-lease-id)
-;;           k (sym-map lock-name)
-;;           update-map (sym-map owner lease-id lease-length-ms)
-;;           cond-expr [:not-exists :lock-name]]
-;;       (<ddb-update ddb-client lock-table-name k update-map cond-expr)))
+  (acquire* [this]
+    (when (and (not @*shutdown?)
+               (not (acquired? this)))
+      (reset! *acquired? true)
+      (on-acquire)))
 
-;;   (<refresh-lock* [this]
-;;     (debugf "%s: Entering <refresh-lock*" actor-name)
-;;     (au/go
-;;       (ca/<! (ca/timeout (/ lease-length-ms refresh-ratio)))
-;;       (let [update-map {:}
-;;             cond-expr]
-;;         (au/<? (<ddb-update ddb-client lock-table-name k
-;;                             update-map cond-expr)))))
+  (<attempt-acquisition* [this prior-lease-id prior-lease-length-ms]
+    (au/go
+      (ca/<! (ca/timeout prior-lease-length-ms))
+      (when (not @*shutdown?)
+        (let [k (sym-map lock-name)
+              info (au/<? (<ddb-get ddb-client lock-table-name k))
+              {:keys [owner lease-length-ms lease-id]} info]
+          (when (and (= prior-lease-id lease-id)
+                     (not @*shutdown?))
+            (let [update-map {:owner actor-name
+                              :lease-id (make-lease-id)
+                              :lease-length-ms lease-length-ms}
+                  cond-expr [:= :lease-id prior-lease-id]
+                  ret (au/<? (<ddb-update ddb-client lock-table-name k
+                                          update-map cond-expr))]
+              (if ret
+                (acquire* this)
+                (release* this))))))))
 
-;;   (start-aquire-loop* [this]
-;;     (ca/go
-;;       (try
-;;         (while-not @*shutdown
-;;           (let [k (u/sym-map lock-name)
-;;                 info (or (au/<? (<ddb-get client locks-table-name k))
-;;                          (au/<? (<create-lock* this)))
-;;                 {:keys [owner lease-length-ms lease-id]} info]
-;;             (if (= actor-name owner)
-;;               (au/<? (<refresh-lock* this))
-;;               (au/<? (attempt-acquisition* this lease-id lease-length-ms)))))
-;;         (catch Exception e
-;;           (errorf "Error in start-aquire-loop*: %s"
-;;                   (lu/get-exception-msg-and-stacktrace e)))))))
+  (<create-lock* [this]
+    (au/go
+      (let [owner actor-name
+            lease-id (make-lease-id)
+            k (sym-map lock-name)
+            update-map (sym-map owner lease-id lease-length-ms)
+            cond-expr [:not-exists :lock-name]
+            ret (au/<? (<ddb-update ddb-client lock-table-name k
+                                    update-map cond-expr))]
+        (if ret
+          (do
+            (acquire* this)
+            (merge k update-map))
+          (do
+            (release* this)
+            (au/<? (<ddb-get ddb-client lock-table-name k)))))))
 
-;; (defn make-distributed-lock-client
-;;   ([lock-name actor-name lease-length-ms on-acquire on-release]
-;;    (make-distributed-lock
-;;     lock-name actor-name lease-length-ms on-acquire on-release
-;;     default-refresh-ratio))
-;;   ([lock-name actor-name lease-length-ms on-acquire on-release
-;;     refresh-ratio]
-;;    (let [^AmazonDynamoDBAsyncClient ddb-client
-;;          (AmazonDynamoDBAsyncClientBuilder/defaultClient)
-;;          *acquired? (atom false)
-;;          *shutdown? (atom false)
-;;          lock (->DistributedLock
-;;                ddb-client lock-name actor-name lease-length-ms on-acquire on-release
-;;                refresh-ratio client *acquired? *shutdown?)]
-;;      (start-aquire-loop* lock)
-;;      lock)))
+  (<refresh-lock* [this]
+    (au/go
+      (ca/<! (ca/timeout (/ lease-length-ms refresh-ratio)))
+      (when-not @*shutdown?
+        (let [k (sym-map lock-name)
+              update-map {:lease-id (make-lease-id)
+                          :lease-length-ms lease-length-ms}
+              cond-expr [:= :owner actor-name]
+              ret (au/<? (<ddb-update ddb-client lock-table-name k
+                                      update-map cond-expr))]
+          (if ret
+            (acquire* this)
+            (release* this))))))
+
+  (start-aquire-loop* [this]
+    (ca/go
+      (try
+        (while (not @*shutdown?)
+          (let [k (sym-map lock-name)
+                info (or (au/<? (<ddb-get ddb-client lock-table-name k))
+                         (au/<? (<create-lock* this)))
+                {:keys [owner lease-length-ms lease-id]} info]
+            (if (= actor-name owner)
+              (when-not @*shutdown?
+                (acquire* this)
+                (au/<? (<refresh-lock* this)))
+              (do
+                (release* this)
+                (when-not @*shutdown?
+                  (au/<? (<attempt-acquisition* this lease-id
+                                                lease-length-ms)))))))
+        (catch Exception e
+          (errorf "Error in start-aquire-loop*: %s"
+                  (lu/get-exception-msg-and-stacktrace e)))))))
+
+(defn make-distributed-lock-client
+  ([lock-name actor-name lease-length-ms on-acquire on-release]
+   (make-distributed-lock-client
+    lock-name actor-name lease-length-ms on-acquire on-release
+    default-lock-refresh-ratio))
+  ([lock-name actor-name lease-length-ms on-acquire on-release
+    refresh-ratio]
+   (let [^AmazonDynamoDBAsyncClient ddb-client
+         (AmazonDynamoDBAsyncClientBuilder/defaultClient)
+         *acquired? (atom false)
+         *shutdown? (atom false)
+         client (->DistributedLockClient
+                 ddb-client lock-name actor-name lease-length-ms on-acquire
+                 on-release refresh-ratio *acquired? *shutdown?)]
+     (start-aquire-loop* client)
+     client)))
