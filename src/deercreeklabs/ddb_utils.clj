@@ -17,6 +17,8 @@
                                             GetItemRequest
                                             GetItemResult
                                             PutItemResult
+                                            QueryRequest
+                                            QueryResult
                                             UpdateItemRequest
                                             UpdateItemResult)
    (java.nio ByteBuffer)
@@ -255,31 +257,35 @@
   [cond-expr]
   [[] []])
 
+(defn attrs->attr-info [attrs]
+  (reduce (fn [acc [i attr]]
+            (let [a-alias (str "#attr" i)
+                  attr (name attr)]
+              (-> acc
+                  (update :attr->alias assoc attr a-alias)
+                  (update :alias->attr assoc a-alias attr))))
+          {:attr->alias {}
+           :alias->attr {}}
+          (map-indexed vector attrs)))
+
+(defn vals->val-info [vs]
+  (reduce (fn [acc [i value]]
+            (let [v-alias (str ":val" i)]
+              (-> acc
+                  (update :value->alias assoc value v-alias)
+                  (update :alias->value assoc v-alias value))))
+          {:value->alias {}
+           :alias->value {}}
+          (map-indexed vector vs)))
+
 (defn make-update-expression-data [update-map cond-expr]
   (let [[ce-attrs ce-vals] (cond-expr->attrs-and-values cond-expr)
         um-attrs (keys update-map)
         um-vals (vals update-map)
         attrs (set (concat ce-attrs um-attrs))
-        vals (set (concat ce-vals um-vals))
-        attr-info (reduce (fn [acc [i attr]]
-                            (let [a-alias (str "#attr" i)
-                                  attr (name attr)]
-                              (-> acc
-                                  (update :attr->alias assoc attr a-alias)
-                                  (update :alias->attr assoc a-alias attr))))
-                          {:attr->alias {}
-                           :alias->attr {}}
-                          (map-indexed vector attrs))
-        val-info (reduce (fn [acc [i value]]
-                           (let [v-alias (str ":val" i)]
-                             (-> acc
-                                 (update :value->alias assoc value v-alias)
-                                 (update :alias->value assoc v-alias value))))
-                         {:value->alias {}
-                          :alias->value {}}
-                         (map-indexed vector vals))
-        {:keys [attr->alias alias->attr]} attr-info
-        {:keys [value->alias alias->value]} val-info
+        vs (set (concat ce-vals um-vals))
+        {:keys [attr->alias alias->attr]} (attrs->attr-info attrs)
+        {:keys [value->alias alias->value]} (vals->val-info vs)
         make-update-pair (fn [[attr value]]
                            (let [a-alias (attr->alias (name attr))
                                  v-alias (value->alias value)]
@@ -333,6 +339,72 @@
          [success-cb failure-cb] (make-cbs ret-ch "<ddb-update")]
      (ddb-update client table-name key-map update-map cond-expr
                  success-cb failure-cb)
+     ret-ch)))
+
+(defn make-query-data [key-map]
+  (when (zero? (count key-map))
+    (throw
+     (ex-info (str "The key map of a query must contain at least the "
+                   "partition key.")
+              (sym-map key-map))))
+  (when (> (count key-map) 2)
+    (throw
+     (ex-info (str "Only the patition key and (optionally) the sort key are "
+                   "permitted in the key map of a query.")
+              (sym-map key-map))))
+  (let [attrs (keys key-map)
+        vs (vals key-map)
+        {:keys [attr->alias alias->attr]} (attrs->attr-info attrs)
+        {:keys [value->alias alias->value]} (vals->val-info vs)
+        make-eq-expr (fn [[attr value]]
+                       (let [a-alias (attr->alias (name attr))
+                             v-alias (value->alias value)]
+                         (str a-alias " = " v-alias)))
+        kcstr (->> key-map
+                   (map make-eq-expr)
+                   (string/join " and "))]
+    (sym-map alias->attr alias->value kcstr)))
+
+(defn ddb-query
+  [^AmazonDynamoDBAsyncClient client table-name key-map opts
+   success-cb failure-cb]
+  (try
+    (let [{:keys [limit reverse?]} opts
+          transform-result (fn [result]
+                             (->> (.getItems ^QueryResult result)
+                                  (map attr-map->clj-map)))
+          handler (make-handler success-cb failure-cb "ddb-query"
+                                transform-result)
+          data (make-query-data key-map)
+          {:keys [alias->attr alias->value kcstr]} data
+          qr (doto (QueryRequest.)
+               (.setTableName table-name)
+               (.setKeyConditionExpression kcstr)
+               (.setExpressionAttributeNames alias->attr)
+               (.setExpressionAttributeValues (clj-map->attr-map
+                                               alias->value)))]
+      (when limit
+        (when-not (integer? limit)
+          (throw (ex-info (str "Query limit must be an integer. Got: " limit)
+                          (sym-map limit opts key-map table-name))))
+        (.setLimit qr (int limit)))
+      (when reverse?
+        (.setScanIndexForward qr false))
+      (.queryAsync client qr handler))
+    (catch Exception e
+      (try
+        (failure-cb e)
+        (catch Exception e
+          (errorf "Error calling failure-cb for ddb-query: %s"
+                  (lu/get-exception-msg-and-stacktrace e)))))))
+
+(defn <ddb-query
+  ([client table-name key-map]
+   (<ddb-query client table-name key-map {}))
+  ([client table-name key-map opts]
+   (let [ret-ch (ca/chan)
+         [success-cb failure-cb] (make-cbs ret-ch "<ddb-query")]
+     (ddb-query client table-name key-map opts success-cb failure-cb)
      ret-ch)))
 
 (defn ^AmazonDynamoDBAsyncClient make-ddb-client []

@@ -14,7 +14,7 @@
 (s/set-fn-validation! true)
 
 
-(deftest ^:the-one test-distributed-locks
+(deftest test-distributed-locks
   (au/test-async
    60000
    (ca/go
@@ -144,4 +144,41 @@
            [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
            _ (is (= ret-ch ch))
            _ (is (true?  ret))
+           ]))))
+
+(deftest ^:the-one test-query
+  (au/test-async
+   5000
+   (ca/go
+     (let [client (du/make-ddb-client)
+           table-name "ddb-test"
+           m {:part "myvals" :sort 1 :value "Foo"}
+           k (select-keys m [:part :sort])
+
+           ret-ch (du/<ddb-put client table-name m)
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (true? ret))
+
+           ret-ch (du/<ddb-put client table-name (assoc m :sort 2))
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (true? ret))
+
+           opts {:limit 1
+                 :reverse? true}
+           ret-ch (du/<ddb-query client table-name (select-keys m [:part]) opts)
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (= 1 (count ret)))
+           highest (first ret)
+           _ (is (= 2 (:sort highest)))
+
+           opts {:limit 1}
+           ret-ch (du/<ddb-query client table-name (select-keys m [:part]) opts)
+           [ret ch] (au/alts? [ret-ch (ca/timeout 1000)])
+           _ (is (= ret-ch ch))
+           _ (is (= 1 (count ret)))
+           lowest (first ret)
+           _ (is (= 1 (:sort lowest)))
            ]))))
