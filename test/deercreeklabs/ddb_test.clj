@@ -18,18 +18,21 @@
   (au/test-async
    60000
    (ca/go
-     (let [lock-name "test-app-primary"
-           lease-length-ms 3000
+     (let [lease-length-ms 3000
+           lock-name "test-app-primary"
+           lock-table-name "test-locks"
+           opts {:lease-length-ms lease-length-ms
+                 :lock-table-name lock-table-name}
            lch (ca/chan)
            on-acq1 #(ca/put! lch :c1-got-lock)
            on-rel1 #(ca/put! lch :c1-released-lock)
            on-acq2 #(ca/put! lch :c2-got-lock)
            on-rel2 #(ca/put! lch :c2-released-lock)
            c1 (du/make-distributed-lock-client
-               lock-name "c1" lease-length-ms on-acq1 on-rel1)
+               lock-name on-acq1 on-rel1 opts)
            _ (ca/<! (ca/timeout (* 1.5 lease-length-ms)))
            c2 (du/make-distributed-lock-client
-               lock-name "c2" lease-length-ms on-acq2 on-rel2)]
+               lock-name on-acq2 on-rel2 opts)]
        (try
          (let [[v ch] (au/alts? [lch (ca/timeout 1000)])
                _ (is (= lch ch))

@@ -5,6 +5,7 @@
    [deercreeklabs.async-utils :as au]
    [deercreeklabs.baracus :as ba]
    [deercreeklabs.log-utils :as lu :refer [debugs]]
+   [schema.core :as s]
    [taoensso.timbre :as timbre :refer [debugf errorf infof]])
   (:import
    (com.amazonaws ClientConfiguration)
@@ -24,8 +25,17 @@
    (java.nio ByteBuffer)
    (java.security SecureRandom)))
 
-(def default-lock-refresh-ratio 4)
-(def lock-table-name "locks")
+(def LockClientOptions
+  {(s/optional-key :actor-name) s/Str
+   (s/optional-key :lease-length-ms) s/Int
+   (s/optional-key :lock-table-name) s/Str
+   (s/optional-key :refresh-ratio) s/Int})
+
+(def default-lock-client-options
+  {:actor-name (str "actor-" (apply str (take 4 (repeatedly #(rand-int 10)))))
+   :lease-length-ms 4000
+   :lock-table-name "locks"
+   :refresh-ratio 4})
 
 (defmacro sym-map
   "Builds a map from symbols.
@@ -427,8 +437,8 @@
   (start-aquire-loop* [this]))
 
 (defrecord DistributedLockClient
-    [ddb-client lock-name actor-name lease-length-ms on-acquire on-release
-     refresh-ratio *acquired? *shutdown?]
+    [ddb-client lock-name on-acquire on-release actor-name lease-length-ms
+     lock-table-name refresh-ratio *acquired? *shutdown?]
   IDistributedLockClient
   (acquired? [this]
     @*acquired?)
@@ -519,19 +529,21 @@
           (errorf "Error in start-aquire-loop*: %s"
                   (lu/get-exception-msg-and-stacktrace e)))))))
 
-(defn make-distributed-lock-client
-  ([lock-name actor-name lease-length-ms on-acquire on-release]
-   (make-distributed-lock-client
-    lock-name actor-name lease-length-ms on-acquire on-release
-    default-lock-refresh-ratio))
-  ([lock-name actor-name lease-length-ms on-acquire on-release
-    refresh-ratio]
-   (let [^AmazonDynamoDBAsyncClient ddb-client
-         (AmazonDynamoDBAsyncClientBuilder/defaultClient)
-         *acquired? (atom false)
-         *shutdown? (atom false)
-         client (->DistributedLockClient
-                 ddb-client lock-name actor-name lease-length-ms on-acquire
-                 on-release refresh-ratio *acquired? *shutdown?)]
-     (start-aquire-loop* client)
-     client)))
+(s/defn make-distributed-lock-client :- (s/protocol IDistributedLockClient)
+  [lock-name :- s/Str
+   on-acquire :- (s/=> s/Any)
+   on-release :- (s/=> s/Any)
+   options :- LockClientOptions]
+  (let [{:keys [actor-name lease-length-ms lock-table-name refresh-ratio]}
+        (merge default-lock-client-options options)
+        ^AmazonDynamoDBAsyncClient ddb-client
+        (AmazonDynamoDBAsyncClientBuilder/defaultClient)
+        *acquired? (atom false)
+        *shutdown? (atom false)
+        client (->DistributedLockClient
+                ddb-client lock-name on-acquire on-release actor-name
+                lease-length-ms lock-table-name refresh-ratio
+                *acquired? *shutdown?)]
+
+    (start-aquire-loop* client)
+    client))
