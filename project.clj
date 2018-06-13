@@ -13,30 +13,32 @@
     :source-paths ["dev" "src"]
     :plugins
     [[lein-ancient "0.6.15"
-      :exclusions [com.amazonaws/aws-java-sdk-s3 commons-logging commons-codec]]
+      :exclusions [org.apache.httpcomponents/httpclient
+                   com.amazonaws/aws-java-sdk-s3 commons-logging commons-codec]]
      [lein-cloverage "1.0.10" :exclusions [org.clojure/clojure
                                            org.clojure/tools.reader]]
      ;; Because of confusion with a defunct project also called
      ;; lein-release, we exclude lein-release from lein-ancient.
      [lein-release "1.0.9" :upgrade false
       :exclusions [org.clojure/clojure]]
-     [s3-wagon-private "1.3.1" :exclusions [commons-logging]]]
+     [s3-wagon-private "1.3.2" :exclusions [commons-logging]]]
     :dependencies
     [[org.clojure/tools.namespace "0.2.11"]]
     :repl-options {:init-ns user}}
    :uberjar {:aot :all}}
 
   :dependencies
-  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.266"
-    :exclusions [commons-logging joda-time]]
+  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.346"
+    :exclusions [com.fasterxml.jackson.core/jackson-core commons-logging
+                 joda-time]]
    [com.taoensso/timbre "4.10.0" :exclusions [org.clojure/tools.reader]]
    [commons-logging/commons-logging "1.2"]
-   [deercreeklabs/async-utils "0.1.8"]
-   [deercreeklabs/baracus "0.1.2"]
-   [deercreeklabs/log-utils "0.1.3"]
+   [deercreeklabs/async-utils "0.1.9"]
+   [deercreeklabs/baracus "0.1.6"]
+   [deercreeklabs/log-utils "0.1.5"]
    [org.clojure/core.async "0.4.474"]
    [org.clojure/clojure "1.9.0"]
-   [prismatic/schema "1.1.7"]]
+   [prismatic/schema "1.1.9"]]
 
   :test-selectors {:default (complement :slow)
                    :the-one :the-one

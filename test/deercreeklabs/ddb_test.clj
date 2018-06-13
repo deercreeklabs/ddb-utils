@@ -146,7 +146,7 @@
            _ (is (true?  ret))
            ]))))
 
-(deftest ^:the-one test-query
+(deftest test-query
   (au/test-async
    5000
    (ca/go
