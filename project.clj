@@ -35,7 +35,7 @@
    [commons-logging/commons-logging "1.2"]
    [deercreeklabs/async-utils "0.1.9"]
    [deercreeklabs/baracus "0.1.6"]
-   [deercreeklabs/log-utils "0.1.5"]
+   [deercreeklabs/log-utils "0.1.6"]
    [org.clojure/core.async "0.4.474"]
    [org.clojure/clojure "1.9.0"]
    [prismatic/schema "1.1.9"]]
