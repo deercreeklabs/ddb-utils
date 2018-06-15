@@ -1,4 +1,4 @@
-(defproject deercreeklabs/ddb-utils "0.1.4"
+(defproject deercreeklabs/ddb-utils "0.1.5-SNAPSHOT"
   :description "Utilities for working with DynamoDB"
   :license {:name "Apache License, Version 2.0"
             :url "http://www.apache.org/licenses/LICENSE-2.0"}
