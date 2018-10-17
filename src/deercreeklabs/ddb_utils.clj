@@ -137,13 +137,13 @@
              (failure-cb e)
              (catch Exception e
                (errorf "Error calling failure-cb for %s: \n%s" op-name
-                       (lu/get-exception-msg-and-stacktrace e)))))))
+                       (lu/ex-msg-and-stacktrace e)))))))
      (onError [this e]
        (try
          (failure-cb (transform-error e))
          (catch Exception e
            (errorf "Error calling failure-cb for %s: \n%s"
-                   op-name (lu/get-exception-msg-and-stacktrace e))))))))
+                   op-name (lu/ex-msg-and-stacktrace e))))))))
 
 (defn make-boolean-handler [success-cb failure-cb op-name]
   (make-handler success-cb failure-cb op-name (constantly true) identity))
@@ -166,7 +166,7 @@
          (failure-cb e)
          (catch Exception e
            (errorf "Error calling failure-cb for ddb-get: %s"
-                   (lu/get-exception-msg-and-stacktrace e))))))))
+                   (lu/ex-msg-and-stacktrace e))))))))
 
 (defn <ddb-get
   ([client table-name key-map]
@@ -188,7 +188,7 @@
         (failure-cb e)
         (catch Exception e
           (errorf "Error calling failure-cb for ddb-put: %s"
-                  (lu/get-exception-msg-and-stacktrace e)))))))
+                  (lu/ex-msg-and-stacktrace e)))))))
 
 (defn <ddb-put [client table-name m]
   (let [ret-ch (ca/chan)
@@ -208,7 +208,7 @@
         (failure-cb e)
         (catch Exception e
           (errorf "Error calling failure-cb for ddb-delete: %s"
-                  (lu/get-exception-msg-and-stacktrace e)))))))
+                  (lu/ex-msg-and-stacktrace e)))))))
 
 (defn <ddb-delete [^AmazonDynamoDBAsyncClient client ^String table-name key-map]
   (let [ret-ch (ca/chan)
@@ -339,7 +339,7 @@
         (failure-cb e)
         (catch Exception e
           (errorf "Error calling failure-cb for ddb-update: %s"
-                  (lu/get-exception-msg-and-stacktrace e)))))))
+                  (lu/ex-msg-and-stacktrace e)))))))
 
 (defn <ddb-update
   ([client table-name key-map update-map]
@@ -406,7 +406,7 @@
         (failure-cb e)
         (catch Exception e
           (errorf "Error calling failure-cb for ddb-query: %s"
-                  (lu/get-exception-msg-and-stacktrace e)))))))
+                  (lu/ex-msg-and-stacktrace e)))))))
 
 (defn <ddb-query
   ([client table-name key-map]
@@ -417,7 +417,7 @@
      (ddb-query client table-name key-map opts success-cb failure-cb)
      ret-ch)))
 
-(defn ^AmazonDynamoDBAsyncClient make-ddb-client []
+(defn ^AmazonDynamoDBAsyncClient ddb-client []
   (AmazonDynamoDBAsyncClientBuilder/defaultClient))
 
 (defn make-lease-id []
@@ -527,9 +527,9 @@
                                                 lease-length-ms)))))))
         (catch Exception e
           (errorf "Error in start-aquire-loop*: %s"
-                  (lu/get-exception-msg-and-stacktrace e)))))))
+                  (lu/ex-msg-and-stacktrace e)))))))
 
-(s/defn make-distributed-lock-client :- (s/protocol IDistributedLockClient)
+(s/defn distributed-lock-client :- (s/protocol IDistributedLockClient)
   [lock-name :- s/Str
    on-acquire :- (s/=> s/Any)
    on-release :- (s/=> s/Any)

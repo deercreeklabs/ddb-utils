@@ -28,10 +28,10 @@
            on-rel1 #(ca/put! lch :c1-released-lock)
            on-acq2 #(ca/put! lch :c2-got-lock)
            on-rel2 #(ca/put! lch :c2-released-lock)
-           c1 (du/make-distributed-lock-client
+           c1 (du/distributed-lock-client
                lock-name on-acq1 on-rel1 opts)
            _ (ca/<! (ca/timeout (* 1.5 lease-length-ms)))
-           c2 (du/make-distributed-lock-client
+           c2 (du/distributed-lock-client
                lock-name on-acq2 on-rel2 opts)]
        (try
          (let [[v ch] (au/alts? [lch (ca/timeout 1000)])
@@ -53,7 +53,7 @@
   (au/test-async
    5000
    (ca/go
-     (let [client (du/make-ddb-client)
+     (let [client (du/ddb-client)
            table-name "ddb-test"
            m {:part "a" :sort 123 :value "Foo"}
            ret-ch (du/<ddb-put client table-name m)
@@ -78,7 +78,7 @@
   (au/test-async
    5000
    (ca/go
-     (let [client (du/make-ddb-client)
+     (let [client (du/ddb-client)
            table-name "ddb-test"
            m {:part "b" :sort 789 :value "Foo"}
 
@@ -153,7 +153,7 @@
   (au/test-async
    5000
    (ca/go
-     (let [client (du/make-ddb-client)
+     (let [client (du/ddb-client)
            table-name "ddb-test"
            m {:part "myvals" :sort 1 :value "Foo"}
            k (select-keys m [:part :sort])
