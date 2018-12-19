@@ -1,4 +1,4 @@
-(defproject deercreeklabs/ddb-utils "0.2.2-SNAPSHOT"
+(defproject deercreeklabs/ddb-utils "0.2.2"
   :description "Utilities for working with DynamoDB"
   :license {:name "Apache License, Version 2.0"
             :url "http://www.apache.org/licenses/LICENSE-2.0"}
@@ -28,16 +28,16 @@
    :uberjar {:aot :all}}
 
   :dependencies
-  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.461"
+  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.472"
     :exclusions [com.fasterxml.jackson.core/jackson-core commons-logging
                  joda-time]]
    [com.taoensso/timbre "4.10.0" :exclusions [org.clojure/tools.reader]]
    [commons-logging/commons-logging "1.2"]
-   [deercreeklabs/async-utils "0.1.13"]
-   [deercreeklabs/baracus "0.1.13"]
-   [deercreeklabs/log-utils "0.2.2"]
+   [deercreeklabs/async-utils "0.1.14"]
+   [deercreeklabs/baracus "0.1.14"]
+   [deercreeklabs/log-utils "0.2.3"]
    [org.clojure/core.async "0.4.490"]
-   [org.clojure/clojure "1.9.0"]
+   [org.clojure/clojure "1.10.0"]
    [prismatic/schema "1.1.9"]]
 
   :test-selectors {:default (complement :slow)
