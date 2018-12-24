@@ -28,14 +28,14 @@
    :uberjar {:aot :all}}
 
   :dependencies
-  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.472"
+  [[com.amazonaws/aws-java-sdk-dynamodb "1.11.475"
     :exclusions [com.fasterxml.jackson.core/jackson-core commons-logging
                  joda-time]]
    [com.taoensso/timbre "4.10.0" :exclusions [org.clojure/tools.reader]]
    [commons-logging/commons-logging "1.2"]
    [deercreeklabs/async-utils "0.1.14"]
    [deercreeklabs/baracus "0.1.14"]
-   [deercreeklabs/log-utils "0.2.3"]
+   [deercreeklabs/log-utils "0.2.4"]
    [org.clojure/core.async "0.4.490"]
    [org.clojure/clojure "1.10.0"]
    [prismatic/schema "1.1.9"]]
