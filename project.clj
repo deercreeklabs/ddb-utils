@@ -31,7 +31,6 @@
   [[com.amazonaws/aws-java-sdk-dynamodb "1.11.475"
     :exclusions [com.fasterxml.jackson.core/jackson-core commons-logging
                  joda-time]]
-   [com.taoensso/timbre "4.10.0" :exclusions [org.clojure/tools.reader]]
    [commons-logging/commons-logging "1.2"]
    [deercreeklabs/async-utils "0.1.14"]
    [deercreeklabs/baracus "0.1.14"]
